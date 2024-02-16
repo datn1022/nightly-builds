@@ -1,0 +1,93 @@
+name: Build nightly images
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 5' # Run every friday at midnight
+
+jobs:
+  build-image:
+    strategy:
+      matrix:
+        version: ["next", "v6.6.1"]
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out build configurations
+        uses: actions/checkout@v4
+        
+      - name: Substitute placeholders in configs
+        run: |
+          find . -type f -name "*.cfg" -exec sed -i "s|HOME|$(echo $HOME)|;s|NPROC|$(nproc)|" {} +
+
+      - name: Install pmbootstrap from git
+        run: |
+          git clone --depth=1 https://gitlab.com/postmarketOS/pmbootstrap.git
+          #py3-dt-schema only avail for edge channel
+          sed -i '/py3-dt-schema/d' pmbootstrap/helpers/envkernel.sh
+          mkdir -p ~/.local/bin
+          ln -s "$PWD/pmbootstrap/pmbootstrap.py" ~/.local/bin/pmbootstrap
+          pmbootstrap --version
+
+      - name: Set up pmaports
+        run: |
+          echo -e '\nv23.06\nfairphone\nfp4\n\n\nphosh\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | pmbootstrap init || true
+          # Since v23.06 do not have testing  folder, create it.
+          mkdir -p ~/.local/var/pmbootstrap/cache_git/pmaports/device/testing
+          cd ~/.local/var/pmbootstrap/cache_git/pmaports
+          echo "merging local pmaport device files to upstream aport...."
+          git config user.name "Your Name"
+          git config user.email "you@example.com"
+          git remote add 99degree https://github.com/99degree/pmaports.git
+          git fetch origin master
+          git fetch 99degree master
+          #git fetch 99degree v23.06
+          #Currently edge channel is not working...
+          git checkout origin/master -f
+          git merge -m "merge upstreaam master with local changes" 99degree/master
+          #git checkout 99degree/v23.06 -f
+          git clean -fdx
+
+      - name: Clone kernel sources
+        run: |
+          git clone https://github.com/99degree/linux.git --single-branch --branch ${{ matrix.version }} --depth 1
+
+      - name: Choose any SM7125 device in pmbootstrap to build kernel
+        run: |
+          cp xiaomi-miatoll.cfg ~/.config/pmbootstrap.cfg
+          pmbootstrap build device-xiaomi-miatoll
+          pmbootstrap build firmware-xiaomi-miatoll
+          pmbootstrap build soc-qcom-sm7150
+
+      - name: Compile kernel with envkernel
+        run: |
+          cd linux
+          shopt -s expand_aliases
+          source ../pmbootstrap/helpers/envkernel.sh
+          make defconfig xiaomi_miatoll.config
+          make -j$(nproc)
+          #to failsafe for private build...
+          pmbootstrap build --envkernel linux-postmarketos-qcom-sm7150
+          
+      - name: Create artifact directory
+        run: |
+          mkdir out
+
+      - name: Build xiaomi-miatoll
+        run: |
+          #cp xiaomi-miatoll.cfg ~/.config/pmbootstrap.cfg
+          #pmbootstrap config boot_size 256
+          pmbootstrap --mirror-alpine "http://dl-cdn.alpinelinux.org/alpine/" update --non-existing
+          pmbootstrap -v --mirror-alpine "http://dl-cdn.alpinelinux.org/alpine/" install --password 147147 --no-sparse --split
+          pmbootstrap export
+          cp /tmp/postmarketOS-export/* out/
+          xz -T0 -9e -v out/*.img
+          ls -la out/
+          echo -e "n\nn\ny\n" | pmbootstrap zap
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: xiaomi-miatoll-${{ matrix.version }}
+          path: out/*miatoll*.img*
+          retention-days: 7
